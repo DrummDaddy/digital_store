@@ -1,0 +1,25 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: digital-store-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: digital_store
+      POSTGRES_USER: digital_store
+      POSTGRES_PASSWORD: digital_store
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "pg_isready -U digital_store -d digital_store"
+        ]
+      interval: 2s
+      timeout: 3s
+      retries: 20
+
+volumes:
+  postgres_data:
