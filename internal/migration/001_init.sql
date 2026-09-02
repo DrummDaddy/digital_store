@@ -144,3 +144,21 @@ CREATE INDEX IF NOT EXISTS products_active_price_idx
 CREATE INDEX IF NOT EXISTS inventory_available_idx
     ON inventory(available, sku)
     WHERE available > 0;
+
+CREATE TABLE IF NOT EXISTS provider_keys (
+                                             id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                                             provider TEXT NOT NULL,
+                                             sku TEXT NOT NULL REFERENCES products(sku),
+                                             code TEXT NOT NULL,
+                                             issued BOOLEAN NOT NULL DEFAULT FALSE,
+                                             request_id TEXT,
+                                             order_id UUID,
+                                             issued_at TIMESTAMPTZ,
+                                             created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+
+                                             CONSTRAINT provider_keys_code_unique UNIQUE (code)
+);
+
+CREATE INDEX IF NOT EXISTS provider_keys_available_idx
+    ON provider_keys(provider, sku, issued, created_at)
+    WHERE issued = FALSE;
