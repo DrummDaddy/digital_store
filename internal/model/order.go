@@ -22,9 +22,8 @@ func (s OrderStatus) IsFinal() bool {
 	return s == OrderDelivered || s == OrderPaymentFailed
 }
 
-func (s OrderStatus) IsRecoverible() bool {
+func (s OrderStatus) IsRecoverable() bool {
 	return s == OrderOutOfStock || s == OrderDeliveryFailed
-
 }
 
 type Product struct {
@@ -43,22 +42,24 @@ type Order struct {
 	AmountMinor int64       `json:"amount"`
 	Currency    string      `json:"currency"`
 	Status      OrderStatus `json:"status"`
-	Code        *string     `json:"code,omitempty"`
-	PaidAt      *time.Time  `json:"paid_at,omitempty"`
-	DeliveredAt *time.Time  `json:"delivered_at,omitempty"`
-	LastError   *string     `json:"last_error,omitempty"`
-	CreatedAt   time.Time   `json:"created_at,omitempty"`
-	UpdatedAt   time.Time   `json:"updated_at,omitempty"`
+
+	Code        *string    `json:"code,omitempty"`
+	PaidAt      *time.Time `json:"paid_at,omitempty"`
+	DeliveredAt *time.Time `json:"delivered_at,omitempty"`
+	LastError   *string    `json:"last_error,omitempty"`
+
+	CreatedAt time.Time `json:"created_at"`
+	UpdatedAt time.Time `json:"updated_at"`
 }
 
-type DeliveredAttempt struct {
+type DeliveryAttempt struct {
 	ID            uuid.UUID  `json:"id"`
-	OrederID      string     `json:"oreder_id"`
+	OrderID       uuid.UUID  `json:"order_id"`
 	RequestID     string     `json:"request_id"`
 	Provider      *string    `json:"provider,omitempty"`
 	Status        string     `json:"status"`
 	Code          *string    `json:"code,omitempty"`
 	Error         *string    `json:"error,omitempty"`
 	Attempts      int        `json:"attempts"`
-	NextAttemptAt *time.Time `json:"next_attempt_at"`
+	NextAttemptAt *time.Time `json:"next_attempt_at,omitempty"`
 }

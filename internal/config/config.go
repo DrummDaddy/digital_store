@@ -6,11 +6,11 @@ import (
 	"time"
 )
 
-type config struct {
+type Config struct {
 	HTTPAddr             string
 	DatabaseURL          string
-	DeliveryPoolInterval time.Duration
-	ProviderTimeOut      time.Duration
+	DeliveryPollInterval time.Duration
+	ProviderTimeout      time.Duration
 	ProviderARate        float64
 	ProviderATimeoutRate float64
 	ProviderBRate        float64
@@ -59,18 +59,21 @@ func getEnv(key, fallback string) string {
 	if value == "" {
 		return fallback
 	}
+
 	return value
 }
 
 func getDurationEnv(key string, fallback time.Duration) time.Duration {
 	value := os.Getenv(key)
 	if value == "" {
-
+		return fallback
 	}
+
 	result, err := time.ParseDuration(value)
 	if err != nil {
 		return fallback
 	}
+
 	return result
 }
 
@@ -79,15 +82,19 @@ func getFloatEnv(key string, fallback float64) float64 {
 	if value == "" {
 		return fallback
 	}
+
 	result, err := strconv.ParseFloat(value, 64)
 	if err != nil {
 		return fallback
 	}
+
 	if result < 0 {
 		return fallback
 	}
+
 	if result > 1 {
 		return fallback
 	}
+
 	return result
 }
