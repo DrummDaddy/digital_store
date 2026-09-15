@@ -145,3 +145,110 @@ func (r *Repository) GetByID(ctx context.Context, db interface {
 func getByIDTx(ctx context.Context, tx pgx.Tx, id uuid.UUID) (model.Order, error) {
 	return getByIDTx(ctx, tx, id)
 }
+
+func (r *Repository) ProcessPayment(
+	ctx context.Context,
+	event model.PaymentWebhook,
+	rawPayload []byte,
+) error {
+	orderID, err := uuid.Parse(event.OrderID)
+	if err != nil {
+		return fmt.Errorf("parse order id: %w", err)
+	}
+
+	tx, err := r.db.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("begin payment transaction: %w", err)
+	}
+	defer tx.Rollback(ctx)
+
+	// Сначала регистрируем событие.
+	// Если такой event_id уже есть, это безопасный повтор.
+	var insertedEventID string
+
+	err = tx.QueryRow(
+		ctx,
+		`
+		INSERT INTO payment_events (
+			event_id,
+			order_id,
+			status,
+			amount_minor,
+			currency,
+			payload
+		)
+		VALUES ($1, $2, $3, $4, $5, $6::jsonb)
+		ON CONFLICT (event_id) DO NOTHING
+		RETURNING event_id
+		`,
+		event.EventID,
+		orderID,
+		event.Status,
+		event.Amount,
+		event.Currency,
+		string(rawPayload),
+	).Scan(&insertedEventID)
+
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			if err := tx.Commit(ctx); err != nil {
+				return fmt.Errorf("commit duplicate payment event: %w", err)
+			}
+
+			return nil
+		}
+
+		return fmt.Errorf("insert payment event: %w", err)
+	}
+
+	var (
+		orderStatus model.OrderStatus
+		orderAmount int64
+		orderCurr   string
+	)
+
+	err = tx.QueryRow(
+		ctx,
+		`
+		SELECT status, amount_minor, currency
+		FROM orders
+		WHERE id = $1
+		FOR UPDATE
+		`,
+		orderID,
+	).Scan(
+		&orderStatus,
+		&orderAmount,
+		&orderCurr,
+	)
+
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			if err := tx.Commit(ctx); err != nil {
+				return fmt.Errorf("commit early payment event: %w", err)
+			}
+
+			return nil
+		}
+
+		return fmt.Errorf("lock order: %w", err)
+	}
+
+	if err := applyPaymentToOrder(
+		ctx,
+		tx,
+		orderID,
+		orderStatus,
+		orderAmount,
+		orderCurr,
+		event,
+	); err != nil {
+		return err
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("commit payment transaction: %w", err)
+	}
+
+	return nil
+}
