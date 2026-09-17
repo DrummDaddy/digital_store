@@ -22,128 +22,204 @@ type Repository struct {
 }
 
 func NewRepository(db *pgxpool.Pool) *Repository {
-	return &Repository{db: db}
+	return &Repository{
+		db: db,
+	}
 }
 
-func (r *Repository) Create(ctx context.Context, sku string) (model.Order, error) {
+type queryRower interface {
+	QueryRow(
+		ctx context.Context,
+		sql string,
+		args ...any,
+	) pgx.Row
+}
+
+func (r *Repository) Create(
+	ctx context.Context,
+	sku string,
+) (model.Order, error) {
 	tx, err := r.db.Begin(ctx)
 	if err != nil {
-		return model.Order{}, fmt.Errorf("error starting transaction: %w", err)
+		return model.Order{}, fmt.Errorf(
+			"begin create order transaction: %w",
+			err,
+		)
 	}
-	defer tx.Rollback(ctx)
+	defer func() {
+		_ = tx.Rollback(ctx)
+	}()
+
 	var (
 		price    int64
 		currency string
 	)
 
-	err = tx.QueryRow(ctx,
-		`SELECT price_minor, currency
-             FROM products 
-             WHERE sku = $1
-             AND active = TRUE`, sku).Scan(&price, &currency)
+	err = tx.QueryRow(
+		ctx,
+		`
+		SELECT
+			price_minor,
+			currency
+		FROM products
+		WHERE sku = $1
+		  AND active = TRUE
+		`,
+		sku,
+	).Scan(
+		&price,
+		&currency,
+	)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return model.Order{}, ErrProductNotFound
 		}
-		return model.Order{}, fmt.Errorf("error querying products: %w", err)
+
+		return model.Order{}, fmt.Errorf(
+			"query product: %w",
+			err,
+		)
 	}
 
-	var order model.Order
+	var result model.Order
 
-	err = tx.QueryRow(ctx,
-		`INSERT INTO orders (
-             sku, 
-             amoount_minor, 
-             currency, 
-             status
-			)
-          VALUES ($1, $2, $3, 'created'
-          RETURNING 
-          id, 
-          sku, 
-          amount_minor,
-                  currency,
-                  status, 
-                  created_at,
-                  updated_at
-                  `, sku,
+	err = tx.QueryRow(
+		ctx,
+		`
+		INSERT INTO orders (
+			sku,
+			amount_minor,
+			currency,
+			status
+		)
+		VALUES ($1, $2, $3, 'created')
+		RETURNING
+			id,
+			sku,
+			amount_minor,
+			currency,
+			status,
+			created_at,
+			updated_at
+		`,
+		sku,
 		price,
-		currency).Scan(&order.ID,
-		&order.SKU,
-		&order.AmountMinor,
-		&order.Currency,
-		&order.Status,
-		&order.CreatedAt,
-		&order.UpdatedAt)
+		currency,
+	).Scan(
+		&result.ID,
+		&result.SKU,
+		&result.AmountMinor,
+		&result.Currency,
+		&result.Status,
+		&result.CreatedAt,
+		&result.UpdatedAt,
+	)
 	if err != nil {
-		return model.Order{}, fmt.Errorf("error inserting order: %w", err)
+		return model.Order{}, fmt.Errorf(
+			"insert order: %w",
+			err,
+		)
 	}
 
-	err = applyPendingPayments(ctx, tx, order.ID, order.AmountMinor, order.Currency)
-	if err != nil {
-		return model.Order{}, fmt.Errorf("error applying pending payments: %w", err)
+	if err := applyPendingPayments(
+		ctx,
+		tx,
+		result.ID,
+		result.AmountMinor,
+		result.Currency,
+	); err != nil {
+		return model.Order{}, fmt.Errorf(
+			"apply pending payments: %w",
+			err,
+		)
 	}
-	order, err = getByIDTx(ctx, tx, order.ID)
+
+	result, err = getByID(ctx, tx, result.ID)
 	if err != nil {
-		return model.Order{}, fmt.Errorf("error getting order: %w", err)
+		return model.Order{}, fmt.Errorf(
+			"get created order: %w",
+			err,
+		)
 	}
+
 	if err := tx.Commit(ctx); err != nil {
-		return model.Order{}, fmt.Errorf("error committing order: %w", err)
+		return model.Order{}, fmt.Errorf(
+			"commit create order transaction: %w",
+			err,
+		)
 	}
-	return order, nil
+
+	return result, nil
 }
 
-func (r *Repository) GetByID(ctx context.Context, db interface {
-	QueryRow(context.Context, string, ...any) pgx.Row
-}, id uuid.UUID) (model.Order, error) {
+func (r *Repository) GetByID(
+	ctx context.Context,
+	id uuid.UUID,
+) (model.Order, error) {
+	return getByID(ctx, r.db, id)
+}
 
-	var (
-		order model.Order
-		code  *string
-	)
+func getByID(
+	ctx context.Context,
+	db queryRower,
+	id uuid.UUID,
+) (model.Order, error) {
+	var result model.Order
 
 	err := db.QueryRow(
-		ctx, `
-        SELECT 
-          o.id, 
-           o.sku, 
-           o.amount_minor, 
-           o.currency, 
-           o.status 
-           o.paid_at, 
-           o.delivered_at
-           o.last_error, 
-           o.created_at, 
-           o.updated_at
-           d.code 
-     FROM orders o
-    LEFT JOIN delivery_attempts d 
-        ON d.order_id = o.id
-        WHERE o.id = $1
- `, id).Scan(&order.ID,
-		&order.SKU,
-		&order.AmountMinor,
-		&order.Currency,
-		&order.Status,
-		&order.PaidAt,
-		&order.DeliveredAt,
-		&order.LastError,
-		&order.CreatedAt,
-		&order.UpdatedAt,
-		&code)
+		ctx,
+		`
+		SELECT
+			o.id,
+			o.sku,
+			o.amount_minor,
+			o.currency,
+			o.status,
+			o.paid_at,
+			o.delivered_at,
+			o.last_error,
+			o.created_at,
+			o.updated_at,
+			d.code
+		FROM orders AS o
+		LEFT JOIN delivery_attempts AS d
+			ON d.order_id = o.id
+		WHERE o.id = $1
+		`,
+		id,
+	).Scan(
+		&result.ID,
+		&result.SKU,
+		&result.AmountMinor,
+		&result.Currency,
+		&result.Status,
+		&result.PaidAt,
+		&result.DeliveredAt,
+		&result.LastError,
+		&result.CreatedAt,
+		&result.UpdatedAt,
+		&result.Code,
+	)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return model.Order{}, ErrOrderNotFound
-
 		}
-		return model.Order{}, fmt.Errorf("error querying order: %w", err)
+
+		return model.Order{}, fmt.Errorf(
+			"query order: %w",
+			err,
+		)
 	}
-	order.Code = code
-	return order, nil
+
+	return result, nil
 }
 
-func getByIDTx(ctx context.Context, tx pgx.Tx, id uuid.UUID) (model.Order, error) {
-	return getByIDTx(ctx, tx, id)
+func getByIDTx(
+	ctx context.Context,
+	tx pgx.Tx,
+	id uuid.UUID,
+) (model.Order, error) {
+	return getByID(ctx, tx, id)
 }
 
 func (r *Repository) ProcessPayment(
@@ -153,17 +229,23 @@ func (r *Repository) ProcessPayment(
 ) error {
 	orderID, err := uuid.Parse(event.OrderID)
 	if err != nil {
-		return fmt.Errorf("parse order id: %w", err)
+		return fmt.Errorf(
+			"parse order id: %w",
+			err,
+		)
 	}
 
 	tx, err := r.db.Begin(ctx)
 	if err != nil {
-		return fmt.Errorf("begin payment transaction: %w", err)
+		return fmt.Errorf(
+			"begin payment transaction: %w",
+			err,
+		)
 	}
-	defer tx.Rollback(ctx)
+	defer func() {
+		_ = tx.Rollback(ctx)
+	}()
 
-	// Сначала регистрируем событие.
-	// Если такой event_id уже есть, это безопасный повтор.
 	var insertedEventID string
 
 	err = tx.QueryRow(
@@ -188,66 +270,87 @@ func (r *Repository) ProcessPayment(
 		event.Currency,
 		string(rawPayload),
 	).Scan(&insertedEventID)
-
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
+
 			if err := tx.Commit(ctx); err != nil {
-				return fmt.Errorf("commit duplicate payment event: %w", err)
+				return fmt.Errorf(
+					"commit duplicate payment event: %w",
+					err,
+				)
 			}
 
 			return nil
 		}
 
-		return fmt.Errorf("insert payment event: %w", err)
+		return fmt.Errorf(
+			"insert payment event: %w",
+			err,
+		)
 	}
 
 	var (
-		orderStatus model.OrderStatus
-		orderAmount int64
-		orderCurr   string
+		currentStatus model.OrderStatus
+		orderAmount   int64
+		orderCurrency string
 	)
 
 	err = tx.QueryRow(
 		ctx,
 		`
-		SELECT status, amount_minor, currency
+		SELECT
+			status,
+			amount_minor,
+			currency
 		FROM orders
 		WHERE id = $1
 		FOR UPDATE
 		`,
 		orderID,
 	).Scan(
-		&orderStatus,
+		&currentStatus,
 		&orderAmount,
-		&orderCurr,
+		&orderCurrency,
 	)
-
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
+
 			if err := tx.Commit(ctx); err != nil {
-				return fmt.Errorf("commit early payment event: %w", err)
+				return fmt.Errorf(
+					"commit early payment event: %w",
+					err,
+				)
 			}
 
 			return nil
 		}
 
-		return fmt.Errorf("lock order: %w", err)
+		return fmt.Errorf(
+			"lock order: %w",
+			err,
+		)
 	}
 
 	if err := applyPaymentToOrder(
 		ctx,
 		tx,
 		orderID,
-		orderStatus,
+		currentStatus,
 		orderAmount,
-		orderCurr,
+		orderCurrency,
 		event,
 	); err != nil {
-		return err
+		return fmt.Errorf(
+			"apply payment to order: %w",
+			err,
+		)
 	}
 
 	if err := tx.Commit(ctx); err != nil {
-		return fmt.Errorf("commit payment transaction: %w", err)
+		return fmt.Errorf(
+			"commit payment transaction: %w",
+			err,
+		)
 	}
 
 	return nil
@@ -271,14 +374,16 @@ func applyPendingPayments(
 		FROM payment_events
 		WHERE order_id = $1
 		  AND processed_at IS NULL
-		ORDER BY received_at ASC
+		ORDER BY received_at ASC, event_id ASC
 		`,
 		orderID,
 	)
 	if err != nil {
-		return fmt.Errorf("select pending payment events: %w", err)
+		return fmt.Errorf(
+			"select pending payment events: %w",
+			err,
+		)
 	}
-	defer rows.Close()
 
 	type pendingPayment struct {
 		EventID  string
@@ -287,7 +392,7 @@ func applyPendingPayments(
 		Currency string
 	}
 
-	var events []pendingPayment
+	events := make([]pendingPayment, 0)
 
 	for rows.Next() {
 		var event pendingPayment
@@ -298,24 +403,29 @@ func applyPendingPayments(
 			&event.Amount,
 			&event.Currency,
 		); err != nil {
-			return fmt.Errorf("scan pending payment event: %w", err)
+			rows.Close()
+
+			return fmt.Errorf(
+				"scan pending payment event: %w",
+				err,
+			)
 		}
 
 		events = append(events, event)
 	}
 
 	if err := rows.Err(); err != nil {
-		return fmt.Errorf("iterate pending payment events: %w", err)
+		rows.Close()
+
+		return fmt.Errorf(
+			"iterate pending payment events: %w",
+			err,
+		)
 	}
 
-	for _, pending := range events {
-		event := model.PaymentWebhook{
-			EventID:  pending.EventID,
-			Status:   pending.Status,
-			Amount:   pending.Amount,
-			Currency: pending.Currency,
-		}
+	rows.Close()
 
+	for _, pending := range events {
 		var currentStatus model.OrderStatus
 
 		err := tx.QueryRow(
@@ -328,9 +438,19 @@ func applyPendingPayments(
 			`,
 			orderID,
 		).Scan(&currentStatus)
-
 		if err != nil {
-			return fmt.Errorf("lock order for pending payment: %w", err)
+			return fmt.Errorf(
+				"lock order for pending payment: %w",
+				err,
+			)
+		}
+
+		event := model.PaymentWebhook{
+			EventID:  pending.EventID,
+			OrderID:  orderID.String(),
+			Status:   pending.Status,
+			Amount:   pending.Amount,
+			Currency: pending.Currency,
 		}
 
 		if err := applyPaymentToOrder(
@@ -342,7 +462,11 @@ func applyPendingPayments(
 			orderCurrency,
 			event,
 		); err != nil {
-			return err
+			return fmt.Errorf(
+				"apply pending event %s: %w",
+				event.EventID,
+				err,
+			)
 		}
 	}
 
@@ -359,33 +483,85 @@ func applyPaymentToOrder(
 	event model.PaymentWebhook,
 ) error {
 
-	if event.Amount != orderAmount || event.Currency != orderCurrency {
-		_, err := tx.Exec(
+	if event.Amount != orderAmount ||
+		event.Currency != orderCurrency {
+		return markPaymentProcessed(
 			ctx,
-			`
-			UPDATE payment_events
-			SET processed_at = now()
-			WHERE event_id = $1
-			`,
-			event.EventID,
-		)
-		if err != nil {
-			return fmt.Errorf("mark invalid payment event processed: %w", err)
-		}
-
-		return fmt.Errorf(
-			"payment amount or currency mismatch: event=%s",
+			tx,
 			event.EventID,
 		)
 	}
 
 	switch event.Status {
 	case "paid":
-		if currentStatus == model.OrderDelivered ||
-			currentStatus == model.OrderPaymentFailed {
+		return applyPaidEvent(
+			ctx,
+			tx,
+			orderID,
+			currentStatus,
+			orderAmount,
+			orderCurrency,
+			event.EventID,
+		)
 
-			return markPaymentProcessed(ctx, tx, event.EventID)
+	case "failed":
+		return applyFailedEvent(
+			ctx,
+			tx,
+			orderID,
+			currentStatus,
+			event.EventID,
+		)
+
+	default:
+		return fmt.Errorf(
+			"unsupported payment status: %s",
+			event.Status,
+		)
+	}
+}
+
+func applyPaidEvent(
+	ctx context.Context,
+	tx pgx.Tx,
+	orderID uuid.UUID,
+	currentStatus model.OrderStatus,
+	orderAmount int64,
+	orderCurrency string,
+	eventID string,
+) error {
+	switch currentStatus {
+	case model.OrderDelivered:
+
+		return markPaymentProcessed(ctx, tx, eventID)
+
+	case model.OrderPaymentFailed:
+
+		return markPaymentProcessed(ctx, tx, eventID)
+
+	case model.OrderCreated:
+		_, err := tx.Exec(
+			ctx,
+			`
+			UPDATE orders
+			SET
+				status = 'paid',
+				paid_at = COALESCE(paid_at, now()),
+				last_error = NULL,
+				updated_at = now()
+			WHERE id = $1
+			  AND status = 'created'
+			`,
+			orderID,
+		)
+		if err != nil {
+			return fmt.Errorf(
+				"mark created order paid: %w",
+				err,
+			)
 		}
+
+	case model.OrderOutOfStock, model.OrderDeliveryFailed:
 
 		_, err := tx.Exec(
 			ctx,
@@ -397,65 +573,108 @@ func applyPaymentToOrder(
 				last_error = NULL,
 				updated_at = now()
 			WHERE id = $1
+			  AND status IN ('out_of_stock', 'delivery_failed')
 			`,
 			orderID,
 		)
 		if err != nil {
-			return fmt.Errorf("mark order paid: %w", err)
-		}
-
-		_, err = tx.Exec(
-			ctx,
-			`
-			INSERT INTO delivery_attempts (
-				order_id,
-				request_id,
-				status,
-				next_attempt_at
+			return fmt.Errorf(
+				"recover paid order: %w",
+				err,
 			)
-			VALUES ($1, $2, 'pending', now())
-			ON CONFLICT (order_id) DO NOTHING
-			`,
-			orderID,
-			fmt.Sprintf("req-%s-1", orderID.String()),
+		}
+
+	case model.OrderPaid, model.OrderDelivering:
+
+	}
+
+	_, err := tx.Exec(
+		ctx,
+		`
+		INSERT INTO delivery_attempts (
+			order_id,
+			request_id,
+			status,
+			next_attempt_at
 		)
-		if err != nil {
-			return fmt.Errorf("create delivery attempt: %w", err)
-		}
-
-		_, err = tx.Exec(
-			ctx,
-			`
-			INSERT INTO ledger_entries (
-				order_id,
-				entry_type,
-				amount_minor,
-				currency
-			)
-			VALUES ($1, 'payment', $2, $3)
-			ON CONFLICT DO NOTHING
-			`,
-			orderID,
-			orderAmount,
-			orderCurrency,
+		VALUES ($1, $2, 'pending', now())
+		ON CONFLICT (order_id) DO UPDATE
+		SET
+			status = CASE
+				WHEN delivery_attempts.status IN (
+					'out_of_stock',
+					'failed'
+				)
+				THEN 'pending'
+				ELSE delivery_attempts.status
+			END,
+			next_attempt_at = CASE
+				WHEN delivery_attempts.status IN (
+					'out_of_stock',
+					'failed'
+				)
+				THEN now()
+				ELSE delivery_attempts.next_attempt_at
+			END,
+			error = CASE
+				WHEN delivery_attempts.status IN (
+					'out_of_stock',
+					'failed'
+				)
+				THEN NULL
+				ELSE delivery_attempts.error
+			END,
+			updated_at = now()
+		`,
+		orderID,
+		fmt.Sprintf("req-%s-1", orderID),
+	)
+	if err != nil {
+		return fmt.Errorf(
+			"create or restore delivery attempt: %w",
+			err,
 		)
-		if err != nil {
-			return fmt.Errorf("create payment ledger entry: %w", err)
-		}
+	}
 
-	case "failed":
-		if currentStatus == model.OrderDelivered {
-			return markPaymentProcessed(ctx, tx, event.EventID)
-		}
+	_, err = tx.Exec(
+		ctx,
+		`
+		INSERT INTO ledger_entries (
+			order_id,
+			entry_type,
+			amount_minor,
+			currency
+		)
+		VALUES ($1, 'payment', $2, $3)
+		ON CONFLICT DO NOTHING
+		`,
+		orderID,
+		orderAmount,
+		orderCurrency,
+	)
+	if err != nil {
+		return fmt.Errorf(
+			"create payment ledger entry: %w",
+			err,
+		)
+	}
 
-		if currentStatus == model.OrderPaid ||
-			currentStatus == model.OrderDelivering ||
-			currentStatus == model.OrderOutOfStock ||
-			currentStatus == model.OrderDeliveryFailed {
+	return markPaymentProcessed(
+		ctx,
+		tx,
+		eventID,
+	)
+}
 
-			return markPaymentProcessed(ctx, tx, event.EventID)
-		}
-
+func applyFailedEvent(
+	ctx context.Context,
+	tx pgx.Tx,
+	orderID uuid.UUID,
+	currentStatus model.OrderStatus,
+	eventID string,
+) error {
+	switch currentStatus {
+	case model.OrderCreated:
 		_, err := tx.Exec(
 			ctx,
 			`
@@ -469,14 +688,26 @@ func applyPaymentToOrder(
 			orderID,
 		)
 		if err != nil {
-			return fmt.Errorf("mark payment failed: %w", err)
+			return fmt.Errorf(
+				"mark payment failed: %w",
+				err,
+			)
 		}
 
-	default:
-		return fmt.Errorf("unsupported payment status: %s", event.Status)
+	case model.OrderPaid,
+		model.OrderDelivering,
+		model.OrderDelivered,
+		model.OrderOutOfStock,
+		model.OrderDeliveryFailed,
+		model.OrderPaymentFailed:
+
 	}
 
-	return markPaymentProcessed(ctx, tx, event.EventID)
+	return markPaymentProcessed(
+		ctx,
+		tx,
+		eventID,
+	)
 }
 
 func markPaymentProcessed(
@@ -493,9 +724,11 @@ func markPaymentProcessed(
 		`,
 		eventID,
 	)
-
 	if err != nil {
-		return fmt.Errorf("mark payment event processed: %w", err)
+		return fmt.Errorf(
+			"mark payment event processed: %w",
+			err,
+		)
 	}
 
 	return nil
