@@ -25,7 +25,8 @@ type Config struct {
 	ProviderBFailRate    float64
 	ProviderBTimeoutRate float64
 
-	ProviderMockTimeout time.Duration
+	ProviderMockTimeout    time.Duration
+	ReconciliationInterval time.Duration
 }
 
 func Load() Config {
@@ -89,6 +90,10 @@ func Load() Config {
 		ProviderMockTimeout: getDurationEnv(
 			"PROVIDER_MOCK_TIMEOUT",
 			5*time.Second,
+		),
+		ReconciliationInterval: getDurationEnv(
+			"RECONCILIATION_INTERVAL",
+			30*time.Second,
 		),
 	}
 }
