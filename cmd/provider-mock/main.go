@@ -12,7 +12,9 @@ import (
 
 	"github.com/DrummDaddy/digital_store/internal/config"
 	"github.com/DrummDaddy/digital_store/internal/database"
-	"github.com/DrummDaddy/digital_store/internal/providermock"
+	"github.com/DrummDaddy/digital_store/internal/delivery"
+	"github.com/DrummDaddy/digital_store/internal/httpapi"
+	"github.com/DrummDaddy/digital_store/internal/order"
 )
 
 func main() {
@@ -47,63 +49,91 @@ func main() {
 	}
 	defer db.Close()
 
-	mockServer := providermock.NewServer(
-		db,
-		providermock.Behavior{
-			FailRate:    cfg.ProviderAFailRate,
-			TimeoutRate: cfg.ProviderATimeoutRate,
-			Timeout:     cfg.ProviderMockTimeout,
-		},
-		providermock.Behavior{
-			FailRate:    cfg.ProviderBFailRate,
-			TimeoutRate: cfg.ProviderBTimeoutRate,
-			Timeout:     cfg.ProviderMockTimeout,
-		},
+	orderRepository := order.NewRepository(db)
+
+	deliveryRepository := delivery.NewRepository(db)
+
+	providerA := delivery.NewHTTPProvider(
+		"provider_a",
+		cfg.ProviderAURL,
+		cfg.ProviderTimeout,
+	)
+
+	providerB := delivery.NewHTTPProvider(
+		"provider_b",
+		cfg.ProviderBURL,
+		cfg.ProviderTimeout,
+	)
+
+	deliveryService := delivery.NewService(
+		deliveryRepository,
+		providerA,
+		providerB,
+		cfg.ProviderRetryCount,
+		cfg.DeliveryRetryDelay,
+		logger,
+	)
+
+	deliveryWorker := delivery.NewWorker(
+		deliveryRepository,
+		deliveryService,
+		cfg.DeliveryPollInterval,
+		logger,
+	)
+
+	api := httpapi.NewServer(
+		orderRepository,
 		logger,
 	)
 
 	httpServer := &http.Server{
-		Addr:              cfg.ProviderMockAddr,
-		Handler:           mockServer.Router(),
+		Addr:              cfg.HTTPAddr,
+		Handler:           api.Router(),
 		ReadHeaderTimeout: 5 * time.Second,
 		ReadTimeout:       10 * time.Second,
-		WriteTimeout:      15 * time.Second,
+		WriteTimeout:      10 * time.Second,
 		IdleTimeout:       60 * time.Second,
 	}
 
 	serverError := make(chan error, 1)
+	workerError := make(chan error, 1)
 
 	go func() {
 		logger.Info(
-			"provider mock started",
-			"address", cfg.ProviderMockAddr,
-			"provider_a_fail_rate",
-			cfg.ProviderAFailRate,
-			"provider_a_timeout_rate",
-			cfg.ProviderATimeoutRate,
-			"provider_b_fail_rate",
-			cfg.ProviderBFailRate,
-			"provider_b_timeout_rate",
-			cfg.ProviderBTimeoutRate,
+			"HTTP server started",
+			"address", cfg.HTTPAddr,
 		)
 
 		serverError <- httpServer.ListenAndServe()
+	}()
+
+	go func() {
+		workerError <- deliveryWorker.Run(ctx)
 	}()
 
 	select {
 	case err := <-serverError:
 		if !errors.Is(err, http.ErrServerClosed) {
 			logger.Error(
-				"provider mock failed",
+				"HTTP server failed",
 				"error", err,
 			)
-			os.Exit(1)
 		}
 
+		stop()
+
+	case err := <-workerError:
+		if err != nil {
+			logger.Error(
+				"delivery worker failed",
+				"error", err,
+			)
+		}
+
+		stop()
+
 	case <-ctx.Done():
-		logger.Info(
-			"provider mock shutdown signal received",
-		)
+		logger.Info("shutdown signal received")
 	}
 
 	shutdownCtx, cancel := context.WithTimeout(
@@ -114,8 +144,10 @@ func main() {
 
 	if err := httpServer.Shutdown(shutdownCtx); err != nil {
 		logger.Error(
-			"provider mock shutdown failed",
+			"HTTP server shutdown failed",
 			"error", err,
 		)
 	}
+
+	logger.Info("application stopped")
 }
