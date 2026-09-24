@@ -45,38 +45,90 @@ func (s *Server) createOrder(
 ) {
 	var request CreateOrderRequest
 
-	if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid JSON")
+	decoder := json.NewDecoder(r.Body)
+	decoder.DisallowUnknownFields()
+
+	if err := decoder.Decode(&request); err != nil {
+		writeError(
+			w,
+			http.StatusBadRequest,
+			"invalid JSON",
+		)
 		return
 	}
 
 	request.SKU = strings.TrimSpace(request.SKU)
+	request.OrderID = strings.TrimSpace(request.OrderID)
 
 	if request.SKU == "" {
-		writeError(w, http.StatusBadRequest, "sku is required")
+		writeError(
+			w,
+			http.StatusBadRequest,
+			"sku is required",
+		)
 		return
 	}
 
-	ctx := r.Context()
+	var (
+		result model.Order
+		err    error
+	)
 
-	result, err := s.orderRepo.Create(ctx, request.SKU)
+	if request.OrderID == "" {
+		result, err = s.orderRepo.Create(
+			r.Context(),
+			request.SKU,
+		)
+	} else {
+		orderID, parseErr := uuid.Parse(request.OrderID)
+		if parseErr != nil {
+			writeError(
+				w,
+				http.StatusBadRequest,
+				"invalid order_id",
+			)
+			return
+		}
+
+		result, err = s.orderRepo.CreateWithID(
+			r.Context(),
+			orderID,
+			request.SKU,
+		)
+	}
+
 	if err != nil {
 		switch {
 		case errors.Is(err, order.ErrProductNotFound):
-			writeError(w, http.StatusNotFound, "product not found")
+			writeError(
+				w,
+				http.StatusNotFound,
+				"product not found",
+			)
+
 		default:
 			s.logger.Error(
 				"create order failed",
 				"error", err,
+				"order_id", request.OrderID,
 				"sku", request.SKU,
 			)
-			writeError(w, http.StatusInternalServerError, "internal server error")
+
+			writeError(
+				w,
+				http.StatusInternalServerError,
+				"internal server error",
+			)
 		}
 
 		return
 	}
 
-	writeJSON(w, http.StatusCreated, result)
+	writeJSON(
+		w,
+		http.StatusCreated,
+		result,
+	)
 }
 
 func (s *Server) getOrder(

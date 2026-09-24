@@ -39,6 +39,22 @@ func (r *Repository) Create(
 	ctx context.Context,
 	sku string,
 ) (model.Order, error) {
+	return r.create(ctx, uuid.New(), sku)
+}
+
+func (r *Repository) CreateWithID(
+	ctx context.Context,
+	orderID uuid.UUID,
+	sku string,
+) (model.Order, error) {
+	return r.create(ctx, orderID, sku)
+}
+
+func (r *Repository) create(
+	ctx context.Context,
+	orderID uuid.UUID,
+	sku string,
+) (model.Order, error) {
 	tx, err := r.db.Begin(ctx)
 	if err != nil {
 		return model.Order{}, fmt.Errorf(
@@ -87,12 +103,13 @@ func (r *Repository) Create(
 		ctx,
 		`
 		INSERT INTO orders (
+			id,
 			sku,
 			amount_minor,
 			currency,
 			status
 		)
-		VALUES ($1, $2, $3, 'created')
+		VALUES ($1, $2, $3, $4, 'created')
 		RETURNING
 			id,
 			sku,
@@ -102,6 +119,7 @@ func (r *Repository) Create(
 			created_at,
 			updated_at
 		`,
+		orderID,
 		sku,
 		price,
 		currency,
@@ -134,7 +152,7 @@ func (r *Repository) Create(
 		)
 	}
 
-	result, err = getByID(ctx, tx, result.ID)
+	result, err = getByIDTx(ctx, tx, result.ID)
 	if err != nil {
 		return model.Order{}, fmt.Errorf(
 			"get created order: %w",

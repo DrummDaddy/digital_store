@@ -1,5 +1,6 @@
 package httpapi
 
 type CreateOrderRequest struct {
-	SKU string `json:"sku"`
+	OrderID string `json:"order_id,omitempty"`
+	SKU     string `json:"sku"`
 }
