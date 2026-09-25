@@ -11,6 +11,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/DrummDaddy/digital_store/internal/catalog"
 	"github.com/DrummDaddy/digital_store/internal/model"
 	"github.com/DrummDaddy/digital_store/internal/order"
 	"github.com/DrummDaddy/digital_store/internal/reconciliation"
@@ -22,8 +23,17 @@ type Server struct {
 
 	db                    *pgxpool.Pool
 	reconciliationService *reconciliation.Service
+	catalogRepo           *catalog.Repository
 }
 type Option func(*Server)
+
+func WithCatalog(
+	repository *catalog.Repository,
+) Option {
+	return func(server *Server) {
+		server.catalogRepo = repository
+	}
+}
 
 func WithOperations(
 	db *pgxpool.Pool,
@@ -83,6 +93,11 @@ func (s *Server) Router() http.Handler {
 	router.Get(
 		"/api/admin/reconciliation",
 		s.reconciliationReport,
+	)
+
+	router.Get(
+		"/api/ctalog",
+		s.catalog,
 	)
 
 	router.Post(

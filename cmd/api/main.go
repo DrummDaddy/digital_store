@@ -10,6 +10,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/DrummDaddy/digital_store/internal/catalog"
 	"github.com/DrummDaddy/digital_store/internal/config"
 	"github.com/DrummDaddy/digital_store/internal/database"
 	"github.com/DrummDaddy/digital_store/internal/delivery"
@@ -46,6 +47,8 @@ func main() {
 		os.Exit(1)
 	}
 	defer db.Close()
+
+	catalogRepository := catalog.NewRepository(db)
 
 	orderRepository := order.NewRepository(db)
 
@@ -87,6 +90,9 @@ func main() {
 		httpapi.WithOperations(
 			db,
 			reconciliationService,
+		),
+		httpapi.WithCatalog(
+			catalogRepository,
 		),
 	)
 

@@ -1105,6 +1105,7 @@ func applyMigrations(
 		"002_delivery_worker.sql",
 		"003_delivery_ledger_unique.sql",
 		"004_reconciliation.sql",
+		"005_catalog.sql",
 	}
 
 	for _, migrationName := range migrations {
