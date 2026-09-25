@@ -1,4 +1,4 @@
-package api
+package main
 
 import (
 	"context"
@@ -49,11 +49,8 @@ func main() {
 	defer db.Close()
 
 	catalogRepository := catalog.NewRepository(db)
-
 	orderRepository := order.NewRepository(db)
-
 	deliveryRepository := delivery.NewRepository(db)
-
 	reconciliationService := reconciliation.NewService(db)
 
 	providerA := delivery.NewHTTPProvider(
@@ -84,7 +81,7 @@ func main() {
 		logger,
 	)
 
-	api := httpapi.NewServer(
+	apiServer := httpapi.NewServer(
 		orderRepository,
 		logger,
 		httpapi.WithOperations(
@@ -98,7 +95,7 @@ func main() {
 
 	httpServer := &http.Server{
 		Addr:              cfg.HTTPAddr,
-		Handler:           api.Router(),
+		Handler:           apiServer.Router(),
 		ReadHeaderTimeout: 5 * time.Second,
 		ReadTimeout:       10 * time.Second,
 		WriteTimeout:      10 * time.Second,
@@ -131,14 +128,14 @@ func main() {
 
 	select {
 	case err := <-serverError:
-		if !errors.Is(err, http.ErrServerClosed) {
+		if err != nil && !errors.Is(err, http.ErrServerClosed) {
 			logger.Error(
 				"HTTP server failed",
 				"error", err,
 			)
+		} else {
+			logger.Info("HTTP server stopped")
 		}
-
-		stop()
 
 	case err := <-workerError:
 		if err != nil {
@@ -146,9 +143,11 @@ func main() {
 				"delivery worker failed",
 				"error", err,
 			)
+		} else {
+			logger.Warn(
+				"delivery worker stopped unexpectedly",
+			)
 		}
-
-		stop()
 
 	case err := <-reconciliationError:
 		if err != nil {
@@ -156,13 +155,40 @@ func main() {
 				"reconciliation loop failed",
 				"error", err,
 			)
+		} else {
+			logger.Warn(
+				"reconciliation loop stopped unexpectedly",
+			)
 		}
 
-		stop()
-
 	case <-ctx.Done():
-		logger.Info("shutdown signal received")
-
-		logger.Info("application stopped")
+		logger.Info(
+			"shutdown signal received",
+			"error", ctx.Err(),
+		)
 	}
+
+	stop()
+
+	shutdownCtx, cancel := context.WithTimeout(
+		context.Background(),
+		5*time.Second,
+	)
+	defer cancel()
+
+	if err := httpServer.Shutdown(shutdownCtx); err != nil {
+		logger.Error(
+			"HTTP server graceful shutdown failed",
+			"error", err,
+		)
+
+		if closeErr := httpServer.Close(); closeErr != nil {
+			logger.Error(
+				"HTTP server forced close failed",
+				"error", closeErr,
+			)
+		}
+	}
+
+	logger.Info("application stopped")
 }
