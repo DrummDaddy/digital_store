@@ -9,34 +9,93 @@ import (
 
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/DrummDaddy/digital_store/internal/model"
 	"github.com/DrummDaddy/digital_store/internal/order"
+	"github.com/DrummDaddy/digital_store/internal/reconciliation"
 )
 
 type Server struct {
 	orderRepo *order.Repository
 	logger    *slog.Logger
+
+	db                    *pgxpool.Pool
+	reconciliationService *reconciliation.Service
+}
+type Option func(*Server)
+
+func WithOperations(
+	db *pgxpool.Pool,
+	service *reconciliation.Service,
+) Option {
+	return func(server *Server) {
+		server.db = db
+		server.reconciliationService = service
+	}
 }
 
 func NewServer(
 	orderRepo *order.Repository,
 	logger *slog.Logger,
+	options ...Option,
 ) *Server {
-	return &Server{
+	server := &Server{
 		orderRepo: orderRepo,
 		logger:    logger,
 	}
+
+	for _, option := range options {
+		option(server)
+	}
+
+	return server
 }
 
 func (s *Server) Router() http.Handler {
-	r := chi.NewRouter()
+	router := chi.NewRouter()
 
-	r.Post("/api/orders", s.createOrder)
-	r.Get("/api/orders/{id}", s.getOrder)
-	r.Post("/api/webhooks/payment", s.paymentWebhook)
+	router.Get(
+		"/health/live",
+		s.liveness,
+	)
 
-	return r
+	router.Get(
+		"/health/ready",
+		s.readiness,
+	)
+
+	router.Post(
+		"/api/orders",
+		s.createOrder,
+	)
+
+	router.Get(
+		"/api/orders/{id}",
+		s.getOrder,
+	)
+
+	router.Post(
+		"/api/webhooks/payment",
+		s.paymentWebhook,
+	)
+
+	router.Get(
+		"/api/admin/reconciliation",
+		s.reconciliationReport,
+	)
+
+	router.Post(
+		"/api/admin/reconciliation/repair",
+		s.repairReconciliation,
+	)
+
+	router.Post(
+		"/api/admin/orders/{id}/retry-delivery",
+		s.retryDelivery,
+	)
+
+	return router
 }
 
 func (s *Server) createOrder(
