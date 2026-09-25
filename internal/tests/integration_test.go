@@ -17,6 +17,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/DrummDaddy/digital_store/internal/reconciliation"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
 
@@ -1439,4 +1440,237 @@ func testLogger() *slog.Logger {
 			nil,
 		),
 	)
+}
+
+func TestRetryRecoverableDelivery(
+	t *testing.T,
+) {
+	db := prepareDatabase(t)
+
+	createdOrder := createPaidOrder(
+		t,
+		db,
+		"evt-retry-recoverable-001",
+	)
+
+	_, err := db.Exec(
+		context.Background(),
+		`
+		UPDATE orders
+		SET
+			status = 'delivery_failed',
+			last_error = 'test failure',
+			updated_at = now()
+		WHERE id = $1
+		`,
+		createdOrder.ID,
+	)
+	if err != nil {
+		t.Fatalf(
+			"mark test order delivery_failed: %v",
+			err,
+		)
+	}
+
+	_, err = db.Exec(
+		context.Background(),
+		`
+		UPDATE delivery_attempts
+		SET
+			status = 'failed',
+			error = 'test failure',
+			next_attempt_at = now() + interval '1 hour',
+			updated_at = now()
+		WHERE order_id = $1
+		`,
+		createdOrder.ID,
+	)
+	if err != nil {
+		t.Fatalf(
+			"mark test delivery failed: %v",
+			err,
+		)
+	}
+
+	service := reconciliation.NewService(db)
+
+	result, err := service.RetryDelivery(
+		context.Background(),
+		createdOrder.ID,
+	)
+	if err != nil {
+		t.Fatalf(
+			"retry recoverable delivery: %v",
+			err,
+		)
+	}
+
+	if result.Status != "queued" {
+		t.Fatalf(
+			"expected queued, got %s",
+			result.Status,
+		)
+	}
+
+	var (
+		orderStatus    string
+		deliveryStatus string
+		requestID      string
+		nextAttemptAt  time.Time
+	)
+
+	err = db.QueryRow(
+		context.Background(),
+		`
+		SELECT
+			o.status::text,
+			d.status,
+			d.request_id,
+			d.next_attempt_at
+		FROM orders AS o
+		JOIN delivery_attempts AS d
+			ON d.order_id = o.id
+		WHERE o.id = $1
+		`,
+		createdOrder.ID,
+	).Scan(
+		&orderStatus,
+		&deliveryStatus,
+		&requestID,
+		&nextAttemptAt,
+	)
+	if err != nil {
+		t.Fatalf(
+			"query retried delivery: %v",
+			err,
+		)
+	}
+
+	if orderStatus != "paid" {
+		t.Fatalf(
+			"expected order paid, got %s",
+			orderStatus,
+		)
+	}
+
+	if deliveryStatus != "pending" {
+		t.Fatalf(
+			"expected delivery pending, got %s",
+			deliveryStatus,
+		)
+	}
+
+	expectedRequestID := fmt.Sprintf(
+		"req-%s-1",
+		createdOrder.ID,
+	)
+
+	if requestID != expectedRequestID {
+		t.Fatalf(
+			"request_id changed: expected %s, got %s",
+			expectedRequestID,
+			requestID,
+		)
+	}
+
+	if nextAttemptAt.After(
+		time.Now().Add(5 * time.Second),
+	) {
+		t.Fatalf(
+			"delivery was not scheduled immediately: %s",
+			nextAttemptAt,
+		)
+	}
+}
+
+func TestRepairCreatesMissingDeliveryJob(
+	t *testing.T,
+) {
+	db := prepareDatabase(t)
+
+	createdOrder := createPaidOrder(
+		t,
+		db,
+		"evt-repair-missing-job-001",
+	)
+
+	_, err := db.Exec(
+		context.Background(),
+		`
+		DELETE FROM delivery_attempts
+		WHERE order_id = $1
+		`,
+		createdOrder.ID,
+	)
+	if err != nil {
+		t.Fatalf(
+			"delete delivery job: %v",
+			err,
+		)
+	}
+
+	service := reconciliation.NewService(db)
+
+	result, err := service.Repair(
+		context.Background(),
+	)
+	if err != nil {
+		t.Fatalf(
+			"repair missing delivery job: %v",
+			err,
+		)
+	}
+
+	if result.CreatedDeliveryJobs != 1 {
+		t.Fatalf(
+			"expected one created job, got %d",
+			result.CreatedDeliveryJobs,
+		)
+	}
+
+	var (
+		requestID string
+		status    string
+	)
+
+	err = db.QueryRow(
+		context.Background(),
+		`
+		SELECT
+			request_id,
+			status
+		FROM delivery_attempts
+		WHERE order_id = $1
+		`,
+		createdOrder.ID,
+	).Scan(
+		&requestID,
+		&status,
+	)
+	if err != nil {
+		t.Fatalf(
+			"query repaired delivery job: %v",
+			err,
+		)
+	}
+
+	expectedRequestID := fmt.Sprintf(
+		"req-%s-1",
+		createdOrder.ID,
+	)
+
+	if requestID != expectedRequestID {
+		t.Fatalf(
+			"expected request_id %s, got %s",
+			expectedRequestID,
+			requestID,
+		)
+	}
+
+	if status != "pending" {
+		t.Fatalf(
+			"expected pending, got %s",
+			status,
+		)
+	}
 }

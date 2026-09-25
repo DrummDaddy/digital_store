@@ -12,8 +12,10 @@ import (
 
 	"github.com/DrummDaddy/digital_store/internal/config"
 	"github.com/DrummDaddy/digital_store/internal/database"
+	"github.com/DrummDaddy/digital_store/internal/delivery"
 	"github.com/DrummDaddy/digital_store/internal/httpapi"
 	"github.com/DrummDaddy/digital_store/internal/order"
+	"github.com/DrummDaddy/digital_store/internal/reconciliation"
 )
 
 func main() {
@@ -45,11 +47,50 @@ func main() {
 	}
 	defer db.Close()
 
-	orderRepo := order.NewRepository(db)
+	orderRepository := order.NewRepository(db)
 
-	api := httpapi.NewServer(orderRepo, logger)
+	deliveryRepository := delivery.NewRepository(db)
 
-	server := &http.Server{
+	reconciliationService := reconciliation.NewService(db)
+
+	providerA := delivery.NewHTTPProvider(
+		"provider_a",
+		cfg.ProviderAURL,
+		cfg.ProviderTimeout,
+	)
+
+	providerB := delivery.NewHTTPProvider(
+		"provider_b",
+		cfg.ProviderBURL,
+		cfg.ProviderTimeout,
+	)
+
+	deliveryService := delivery.NewService(
+		deliveryRepository,
+		providerA,
+		providerB,
+		cfg.ProviderRetryCount,
+		cfg.DeliveryRetryDelay,
+		logger,
+	)
+
+	deliveryWorker := delivery.NewWorker(
+		deliveryRepository,
+		deliveryService,
+		cfg.DeliveryPollInterval,
+		logger,
+	)
+
+	api := httpapi.NewServer(
+		orderRepository,
+		logger,
+		httpapi.WithOperations(
+			db,
+			reconciliationService,
+		),
+	)
+
+	httpServer := &http.Server{
 		Addr:              cfg.HTTPAddr,
 		Handler:           api.Router(),
 		ReadHeaderTimeout: 5 * time.Second,
@@ -58,7 +99,9 @@ func main() {
 		IdleTimeout:       60 * time.Second,
 	}
 
-	serverErr := make(chan error, 1)
+	serverError := make(chan error, 1)
+	workerError := make(chan error, 1)
+	reconciliationError := make(chan error, 1)
 
 	go func() {
 		logger.Info(
@@ -66,32 +109,54 @@ func main() {
 			"address", cfg.HTTPAddr,
 		)
 
-		serverErr <- server.ListenAndServe()
+		serverError <- httpServer.ListenAndServe()
+	}()
+
+	go func() {
+		workerError <- deliveryWorker.Run(ctx)
+	}()
+
+	go func() {
+		reconciliationError <- reconciliationService.RunRepairLoop(
+			ctx,
+			cfg.ReconciliationInterval,
+		)
 	}()
 
 	select {
-	case err := <-serverErr:
+	case err := <-serverError:
 		if !errors.Is(err, http.ErrServerClosed) {
-			logger.Error("HTTP server failed", "error", err)
-			os.Exit(1)
+			logger.Error(
+				"HTTP server failed",
+				"error", err,
+			)
 		}
+
+		stop()
+
+	case err := <-workerError:
+		if err != nil {
+			logger.Error(
+				"delivery worker failed",
+				"error", err,
+			)
+		}
+
+		stop()
+
+	case err := <-reconciliationError:
+		if err != nil {
+			logger.Error(
+				"reconciliation loop failed",
+				"error", err,
+			)
+		}
+
+		stop()
 
 	case <-ctx.Done():
 		logger.Info("shutdown signal received")
+
+		logger.Info("application stopped")
 	}
-
-	shutdownCtx, cancel := context.WithTimeout(
-		context.Background(),
-		5*time.Second,
-	)
-	defer cancel()
-
-	if err := server.Shutdown(shutdownCtx); err != nil {
-		logger.Error(
-			"HTTP server shutdown failed",
-			"error", err,
-		)
-	}
-
-	logger.Info("application stopped")
 }
